@@ -124,7 +124,34 @@ const readSchemaInformationFromFile = async (
   return schemaParts;
 };
 
-function mergeSchema(schemaParts: SchemaPart[]): Map<string, SchemaPart> {
+const mergeNamespaceFunctions = (
+  functions: SchemaPartFunction[],
+  existingSchemaPart: SchemaPart
+) => {
+  return functions
+    .concat(existingSchemaPart.functions)
+    .filter(
+      (schemaPart, index, result) => result.indexOf(schemaPart) === index
+    );
+};
+
+const mergeNamespaceTypes = (
+  types: SchemaPartType[],
+  existingSchemaPart: SchemaPart
+) => {
+  return types
+    .concat(existingSchemaPart.types)
+    .filter((schemaPart, index, result) => {
+      if (!schemaPart.id) {
+        // always keep parts with no name
+        return 0;
+      }
+
+      return result.findIndex((item) => item.id === schemaPart.id) === index;
+    });
+};
+
+const mergeSchema = (schemaParts: SchemaPart[]): Map<string, SchemaPart> => {
   const namespaces = new Map<string, SchemaPart>();
   schemaParts.forEach((schemaPart) => {
     const { namespace, functions = [], types = [] } = schemaPart;
@@ -136,8 +163,8 @@ function mergeSchema(schemaParts: SchemaPart[]): Map<string, SchemaPart> {
       const existingSchemaPart = namespaces.get(namespace)!;
       const mergedSchemaPart = {
         namespace,
-        functions: functions.concat(existingSchemaPart.functions),
-        types: types.concat(existingSchemaPart.types),
+        functions: mergeNamespaceFunctions(functions, existingSchemaPart),
+        types: mergeNamespaceTypes(types, existingSchemaPart),
       };
 
       namespaces.set(namespace, mergedSchemaPart);
@@ -145,7 +172,24 @@ function mergeSchema(schemaParts: SchemaPart[]): Map<string, SchemaPart> {
   });
 
   return namespaces;
-}
+};
+
+const postProcessSchemaFunctions = (schemaFunctions: SchemaPartFunction[]) => {
+  return schemaFunctions.filter((item) => item.name !== "delete");
+};
+
+const postProcessNamespaces = (
+  namespaces: Map<string, SchemaPart>
+): Map<string, SchemaPart> => {
+  const result = new Map<string, SchemaPart>();
+  namespaces.forEach((namespaceSchema, namespace) => {
+    result.set(namespace, {
+      ...namespaceSchema,
+      functions: postProcessSchemaFunctions(namespaceSchema.functions),
+    });
+  });
+  return result;
+};
 
 const readSchemaFiles = async (filenames: string[]): Promise<SchemaPart[]> => {
   let result: SchemaPart[] = [];
@@ -222,7 +266,8 @@ const getType = (property: {
       if (Array.isArray(property.enum)) {
         return Array.from(property.enum)
           .map((item) => `'${item}'`)
-          .join(`\n | `);
+          .join(`\n | `)
+          .trim();
       }
       return "enum";
     }
@@ -364,7 +409,7 @@ const generateTypingsFile = async (
     data += `declare namespace browser.${namespace} {\n`;
 
     data += generateTypeTypings(namespace, namespaces);
-    // data += generateFunctionTypings(namespace, namespaces);
+    data += generateFunctionTypings(namespace, namespaces);
 
     data += `}\n\n`;
   });
@@ -389,7 +434,7 @@ const generateTypings = async ({
   ];
 
   const schemaParts = await readSchemaFiles(filenames);
-  const namespaces = mergeSchema(schemaParts);
+  const namespaces = postProcessNamespaces(mergeSchema(schemaParts));
 
   await generateTypingsFile(outputDirectory, namespaces);
 };
