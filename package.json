@@ -1,0 +1,18 @@
+{
+  "name": "generate-mail-extension-typings",
+  "version": "1.0.0",
+  "description": "Generate mail extension typings from Thunderbird schema files",
+  "main": "index.js",
+  "scripts": {
+    "start": "node --loader ts-node/esm ./src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Arnd Issler <https://github.com/arndissler>",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "meow": "^10.1.0",
+    "ts-node": "^10.1.0",
+    "typescript": "^4.3.5"
+  }
+}
