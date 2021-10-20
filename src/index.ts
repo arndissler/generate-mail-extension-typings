@@ -12,7 +12,7 @@ interface SchemaPartFunctionParameter {
 
 interface SchemaPartFunction {
   readonly name: string;
-  readonly async: "callback" | boolean;
+  readonly async: "callback" | "responseCallback" | boolean;
   readonly description: string;
   readonly parameters: SchemaPartFunctionParameter[];
 }
@@ -238,20 +238,39 @@ const generateFunctionTypings = (
   }
 
   schema.functions.forEach((schemaPart) => {
-    const parameters = schemaPart.parameters.filter(
-      (param) => param.name !== "callback"
-    );
-    const asyncReturnType = schemaPart.parameters.find(
-      (param) => param.name === "callback"
-    );
-    const returnType =
-      typeof schemaPart.async === "string"
-        ? schemaPart.async === "callback" && asyncReturnType !== undefined
-          ? getType(asyncReturnType)
-          : "ERR"
-        : schemaPart.async === true
-        ? "Promise<void>"
-        : "void";
+    const findReturnType = (func: SchemaPartFunction) => {
+      const parameters = func.parameters.filter(
+        (param) =>
+          param.name !== "callback" && param.name !== "responseCallback"
+      );
+
+      if (typeof func.async === "string") {
+        const asyncReturnType = func.parameters.find(
+          (param) => param.name === "callback"
+        );
+        if (func.async === "callback" && asyncReturnType !== undefined) {
+          return { returnType: getType(asyncReturnType), parameters };
+        } else if (func.async === "responseCallback") {
+          // check if we have a responseCallback type,
+          // then we have to patch the param list as well
+          return {
+            returnType: "Promise<any>",
+            parameters: parameters.filter(
+              (param) => param.name === "responseCallback"
+            ),
+          };
+        }
+        return { returnType: "ERR", parameters: [] };
+      }
+
+      return {
+        returnType: func.async === true ? "Promise<void>" : "void",
+        parameters,
+      };
+    };
+
+    const { returnType, parameters } = findReturnType(schemaPart);
+
     if (returnType === "ERR") {
       const error = `Unknown async type, namespace ${currentNamespace}, function '${schemaPart.name}': '${schemaPart.async}'`;
       // throw new Error(
@@ -260,10 +279,45 @@ const generateFunctionTypings = (
       logger.error(error);
     }
     result += generateDescription(schemaPart);
-    result += `  function ${schemaPart.name}(${generateFunctionParams(
-      parameters
-    )}): ${returnType};`;
-    result += `\n`;
+
+    // check if we have optional parameters BEFORE defining required parameters
+    // if so, add additional function signatures
+    const firstOptionalParameter = parameters.findIndex(
+      (param) => param.optional
+    );
+    const firstRequiredParameter = parameters.findIndex(
+      (param) => !param.optional
+    );
+
+    if (
+      firstOptionalParameter >= 0 &&
+      firstOptionalParameter < firstRequiredParameter
+    ) {
+      const requireAllParams = (params: SchemaPartFunctionParameter[]) =>
+        params.map((parameter) => ({ ...parameter, optional: false }));
+      const leadingOptionalParameters = parameters.slice(
+        0,
+        firstRequiredParameter
+      );
+
+      let overrides = "";
+      leadingOptionalParameters.forEach((_, index) => {
+        overrides += `  function ${schemaPart.name}(${generateFunctionParams(
+          requireAllParams(parameters.slice(index + 1))
+        )}): ${returnType};`;
+        overrides += `\n`;
+        result += overrides;
+      });
+      result += `  function ${schemaPart.name}(${generateFunctionParams(
+        requireAllParams(parameters)
+      )}): ${returnType};`;
+      result += `\n`;
+    } else {
+      result += `  function ${schemaPart.name}(${generateFunctionParams(
+        parameters
+      )}): ${returnType};`;
+      result += `\n`;
+    }
   });
   return result;
 };
