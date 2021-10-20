@@ -215,6 +215,18 @@ const generateDescription = (
   return "";
 };
 
+const generateFunctionParams = (parameters: SchemaPartFunctionParameter[]) => {
+  const result: string[] = [];
+  parameters.forEach((param) => {
+    result.push(
+      `${generateDescription(param)}\n${param.name}${
+        param.optional ? "?" : ""
+      }: ${getType(param)}`.trim()
+    );
+  });
+  return result.join(", ");
+};
+
 const generateFunctionTypings = (
   currentNamespace: string,
   namespaces: Map<string, SchemaPart>
@@ -226,14 +238,31 @@ const generateFunctionTypings = (
   }
 
   schema.functions.forEach((schemaPart) => {
+    const parameters = schemaPart.parameters.filter(
+      (param) => param.name !== "callback"
+    );
+    const asyncReturnType = schemaPart.parameters.find(
+      (param) => param.name === "callback"
+    );
     const returnType =
       typeof schemaPart.async === "string"
-        ? "/* undefined */ void"
+        ? schemaPart.async === "callback" && asyncReturnType !== undefined
+          ? getType(asyncReturnType)
+          : "ERR"
         : schemaPart.async === true
         ? "Promise<void>"
         : "void";
+    if (returnType === "ERR") {
+      const error = `Unknown async type, namespace ${currentNamespace}, function '${schemaPart.name}': '${schemaPart.async}'`;
+      // throw new Error(
+
+      // );
+      logger.error(error);
+    }
     result += generateDescription(schemaPart);
-    result += `  function ${schemaPart.name}(): ${returnType};`;
+    result += `  function ${schemaPart.name}(${generateFunctionParams(
+      parameters
+    )}): ${returnType};`;
     result += `\n`;
   });
   return result;
