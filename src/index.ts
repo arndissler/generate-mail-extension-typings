@@ -55,6 +55,9 @@ const cli = meow(
     e.g. path/to/thunderbird/source/toolkit/components/extensions/schemas
   --output-directory ./out
     The output folder where the index.d.ts file should be written to
+  --ignored-namespaces test
+    namespaces that should be ignored, comma separated list (e.g. test,runtime)
+    WARNING: may lead to a corrupt type definition file
 `,
   {
     importMeta: import.meta,
@@ -70,6 +73,11 @@ const cli = meow(
       outputDirectory: {
         type: "string",
         isRequired: true,
+      },
+      ignoredNamespaces: {
+        type: "string",
+        isRequired: false,
+        default: "",
       },
     },
   }
@@ -506,10 +514,12 @@ const generateTypings = async ({
   schemaDirectory,
   browserSchemaDirectory,
   outputDirectory,
+  ignoredNamespaces,
 }: {
   readonly schemaDirectory: string;
   readonly browserSchemaDirectory: string;
   readonly outputDirectory: string;
+  readonly ignoredNamespaces: string;
 }) => {
   const filenames = [
     ...(await readSchemaFileNames(schemaDirectory)),
@@ -518,6 +528,13 @@ const generateTypings = async ({
 
   const schemaParts = await readSchemaFiles(filenames);
   const namespaces = postProcessNamespaces(mergeSchema(schemaParts));
+
+  if (ignoredNamespaces) {
+    const ignoredNamespacesList = ignoredNamespaces.split(",");
+    ignoredNamespacesList.forEach((ignoredNamespace) =>
+      namespaces.delete(ignoredNamespace)
+    );
+  }
 
   await generateTypingsFile(outputDirectory, namespaces);
 };
