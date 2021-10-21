@@ -295,34 +295,34 @@ const generateFunctionTypings = (
 
     // check if we have optional parameters BEFORE defining required parameters
     // if so, add additional function signatures
-    const firstOptionalParameter = parameters.findIndex(
+    const firstOptionalParameterIndex = parameters.findIndex(
       (param) => param.optional
     );
-    const firstRequiredParameter = parameters.findIndex(
-      (param) => !param.optional
-    );
+    const allTrailingAreOptional = parameters
+      .slice(firstOptionalParameterIndex)
+      .every(({ optional }) => optional);
 
-    if (
-      firstOptionalParameter >= 0 &&
-      firstOptionalParameter < firstRequiredParameter
-    ) {
+    if (!allTrailingAreOptional) {
       const requireAllParams = (params: SchemaPartFunctionParameter[]) =>
         params.map((parameter) => ({ ...parameter, optional: false }));
-      const leadingOptionalParameters = parameters.slice(
-        0,
-        firstRequiredParameter
-      );
 
+      let params = [...parameters];
       let overrides = "";
-      leadingOptionalParameters.forEach((_, index) => {
+
+      while (params.findIndex(({ optional }) => optional) >= 0) {
         overrides += `  function ${schemaPart.name}(${generateFunctionParams(
-          requireAllParams(parameters.slice(index + 1))
+          requireAllParams(params)
         )}): ${returnType};`;
         overrides += `\n`;
-        result += overrides;
-      });
+        const firstElementToBeRemoved = params.findIndex(
+          ({ optional }) => optional
+        );
+        params = params.filter((_, index) => index !== firstElementToBeRemoved);
+      }
+
+      result += overrides;
       result += `  function ${schemaPart.name}(${generateFunctionParams(
-        requireAllParams(parameters)
+        requireAllParams(params)
       )}): ${returnType};`;
       result += `\n`;
     } else {
