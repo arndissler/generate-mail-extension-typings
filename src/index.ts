@@ -213,10 +213,15 @@ const generateDescription = (
   chunk: { description?: string },
   indention: number = 0
 ): string => {
-  if (chunk.description) {
+  const { description } = chunk;
+  if (description) {
     return `${Array(indention).join("  ")}  /**\n ${Array(indention + 1).join(
       "  "
-    )}* ${chunk.description}
+    )}* ${description
+      .replace(/<\/?code>/g, "`")
+      .replace(/<\/?b>/g, "**")
+      .replace(/<\/?em>/g, "*")
+      .replace(/<\/?strong>/g, "**")}
   */\n`;
   }
 
