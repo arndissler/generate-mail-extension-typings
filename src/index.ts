@@ -499,7 +499,14 @@ const generateTypingsFile = async (
   outputDirectory: string,
   namespaces: Map<string, SchemaPart>
 ) => {
-  let data = "";
+  let data = `interface Window {
+    browser: typeof browser;
+    messenger: typeof browser;
+}
+
+import messenger = browser;
+
+`;
   namespaces.forEach((schema, namespace) => {
     data += generateDescription(schema);
     data += `declare namespace browser.${namespace} {\n`;
