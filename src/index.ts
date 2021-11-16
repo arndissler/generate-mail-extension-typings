@@ -8,6 +8,7 @@ interface SchemaPartFunctionParameter {
   readonly optional: boolean;
   readonly type: string;
   readonly description?: string;
+  readonly parameters?: SchemaPartType[];
 }
 
 interface SchemaPartFunction {
@@ -25,9 +26,15 @@ interface SchemaPartType {
   readonly properties?: {
     [key: string]: SchemaPartType;
   };
+  readonly functions: SchemaPartFunction[];
   readonly choices?: SchemaPartType[];
   readonly enum?: SchemaPartType[];
   readonly optional?: boolean;
+}
+
+interface SchemaPropertyType {
+  readonly $ref?: string;
+  readonly description: string;
 }
 
 interface SchemaPart {
@@ -35,6 +42,7 @@ interface SchemaPart {
   readonly description?: string;
   readonly functions: SchemaPartFunction[];
   readonly types: SchemaPartType[];
+  readonly properties: { [key: string]: SchemaPropertyType };
 }
 
 const logger = {
@@ -159,10 +167,17 @@ const mergeNamespaceTypes = (
     });
 };
 
+const mergeNameSpaceProperties = (
+  properties: SchemaPart["properties"],
+  existingSchemaPart: SchemaPart
+) => {
+  return properties;
+};
+
 const mergeSchema = (schemaParts: SchemaPart[]): Map<string, SchemaPart> => {
   const namespaces = new Map<string, SchemaPart>();
   schemaParts.forEach((schemaPart) => {
-    const { namespace, functions = [], types = [] } = schemaPart;
+    const { namespace, functions = [], types = [], properties } = schemaPart;
     if (!namespaces.has(namespace)) {
       // initialize the namespace object
       namespaces.set(namespace, { ...schemaPart, functions, types });
@@ -173,6 +188,7 @@ const mergeSchema = (schemaParts: SchemaPart[]): Map<string, SchemaPart> => {
         namespace,
         functions: mergeNamespaceFunctions(functions, existingSchemaPart),
         types: mergeNamespaceTypes(types, existingSchemaPart),
+        properties: mergeNameSpaceProperties(properties, existingSchemaPart),
       };
 
       namespaces.set(namespace, mergedSchemaPart);
@@ -228,6 +244,94 @@ const generateDescription = (
   return "";
 };
 
+const createFunctionDefinition = (
+  schemaPart: SchemaPartFunction,
+  currentNamespace: string,
+  options?: { omitFunctionKeyword: boolean }
+) => {
+  const { omitFunctionKeyword = false } = options || {};
+  let result = "";
+  const findReturnType = (func: SchemaPartFunction) => {
+    const parameters = schemaPart.parameters.filter(
+      (param) => param.name !== "callback" && param.name !== "responseCallback"
+    );
+    if (typeof func.async === "string") {
+      const asyncReturnType = func.parameters.find(
+        (param) => param.name === func.async && param.type === "function"
+      );
+      const unwrappedAsyncReturnType = getType(
+        (asyncReturnType?.parameters || []).shift()
+      );
+      const funcParams = func.parameters.filter(
+        (param) => param.name !== func.async //&& param.type === "function"
+      );
+
+      return {
+        returnType: `Promise<${unwrappedAsyncReturnType || "any"}>`,
+        parameters: funcParams,
+      };
+
+      // this must be an unkown error
+      return { returnType: "ERR", parameters: [] };
+    }
+
+    return {
+      returnType: func.async === true ? "Promise<any>" : "void",
+      parameters,
+    };
+  };
+
+  const { returnType, parameters } = findReturnType(schemaPart);
+
+  if (returnType === "ERR") {
+    const error = `Unknown async type, namespace ${currentNamespace}, function '${schemaPart.name}': '${schemaPart.async}'`;
+    // throw new Error(
+    // );
+    logger.error(error);
+  }
+  result += generateDescription(schemaPart);
+
+  // check if we have optional parameters BEFORE defining required parameters
+  // if so, add additional function signatures
+  const firstOptionalParameterIndex = parameters.findIndex(
+    (param) => param.optional
+  );
+  const allTrailingAreOptional = parameters
+    .slice(firstOptionalParameterIndex)
+    .every(({ optional }) => optional);
+
+  if (!allTrailingAreOptional) {
+    const requireAllParams = (params: SchemaPartFunctionParameter[]) =>
+      params.map((parameter) => ({ ...parameter, optional: false }));
+
+    let params = [...parameters];
+    let overrides = "";
+
+    while (params.findIndex(({ optional }) => optional) >= 0) {
+      overrides += `  ${omitFunctionKeyword ? "" : "function "}${
+        schemaPart.name
+      }(${generateFunctionParams(requireAllParams(params))}): ${returnType};`;
+      overrides += `\n`;
+      const firstElementToBeRemoved = params.findIndex(
+        ({ optional }) => optional
+      );
+      params = params.filter((_, index) => index !== firstElementToBeRemoved);
+    }
+
+    result += overrides;
+    result += `  ${omitFunctionKeyword ? "" : "function "}${
+      schemaPart.name
+    }(${generateFunctionParams(requireAllParams(params))}): ${returnType};`;
+    result += `\n`;
+  } else {
+    result += `  ${omitFunctionKeyword ? "" : "function "}${
+      schemaPart.name
+    }(${generateFunctionParams(parameters)}): ${returnType};`;
+    result += `\n`;
+  }
+  return result;
+};
+
 const generateFunctionParams = (parameters: SchemaPartFunctionParameter[]) => {
   const result: string[] = [];
   parameters.forEach((param) => {
@@ -251,100 +355,53 @@ const generateFunctionTypings = (
   }
 
   schema.functions.forEach((schemaPart) => {
-    const findReturnType = (func: SchemaPartFunction) => {
-      const parameters = func.parameters.filter(
-        (param) =>
-          param.name !== "callback" && param.name !== "responseCallback"
-      );
-
-      if (typeof func.async === "string") {
-        const asyncReturnType = func.parameters.find(
-          (param) => param.name === "callback"
-        );
-        if (func.async === "callback" && asyncReturnType !== undefined) {
-          return { returnType: getType(asyncReturnType), parameters };
-        } else if (func.async === "responseCallback") {
-          // check if we have a responseCallback type,
-          // then we have to patch the param list as well
-          return {
-            returnType: "Promise<any>",
-            parameters: parameters.filter(
-              (param) => param.name === "responseCallback"
-            ),
-          };
-        }
-        return { returnType: "ERR", parameters: [] };
-      }
-
-      return {
-        returnType: func.async === true ? "Promise<void>" : "void",
-        parameters,
-      };
-    };
-
-    const { returnType, parameters } = findReturnType(schemaPart);
-
-    if (returnType === "ERR") {
-      const error = `Unknown async type, namespace ${currentNamespace}, function '${schemaPart.name}': '${schemaPart.async}'`;
-      // throw new Error(
-
-      // );
-      logger.error(error);
-    }
-    result += generateDescription(schemaPart);
-
-    // check if we have optional parameters BEFORE defining required parameters
-    // if so, add additional function signatures
-    const firstOptionalParameterIndex = parameters.findIndex(
-      (param) => param.optional
-    );
-    const allTrailingAreOptional = parameters
-      .slice(firstOptionalParameterIndex)
-      .every(({ optional }) => optional);
-
-    if (!allTrailingAreOptional) {
-      const requireAllParams = (params: SchemaPartFunctionParameter[]) =>
-        params.map((parameter) => ({ ...parameter, optional: false }));
-
-      let params = [...parameters];
-      let overrides = "";
-
-      while (params.findIndex(({ optional }) => optional) >= 0) {
-        overrides += `  function ${schemaPart.name}(${generateFunctionParams(
-          requireAllParams(params)
-        )}): ${returnType};`;
-        overrides += `\n`;
-        const firstElementToBeRemoved = params.findIndex(
-          ({ optional }) => optional
-        );
-        params = params.filter((_, index) => index !== firstElementToBeRemoved);
-      }
-
-      result += overrides;
-      result += `  function ${schemaPart.name}(${generateFunctionParams(
-        requireAllParams(params)
-      )}): ${returnType};`;
-      result += `\n`;
-    } else {
-      result += `  function ${schemaPart.name}(${generateFunctionParams(
-        parameters
-      )}): ${returnType};`;
-      result += `\n`;
-    }
+    result += createFunctionDefinition(schemaPart, currentNamespace);
   });
   return result;
 };
 
-const getType = (property: {
-  $ref?: string;
-  type?: string;
-  enum?: any;
-  items?: { type: string } | { $ref: string };
-  choices?: SchemaPartType[];
-  properties?: {
-    [key: string]: SchemaPartType;
-  };
-}): string => {
+const generateNamespacePropertyTypings = (
+  currentNamespace: string,
+  namespaces: Map<string, SchemaPart>
+): string => {
+  let result = "";
+  const schema = namespaces.get(currentNamespace);
+  if (
+    !schema ||
+    !schema.properties ||
+    Object.keys(schema.properties).length === 0
+  ) {
+    return result;
+  }
+
+  console.log(schema.properties);
+  console.log(">> ", schema.properties.keys);
+  Object.entries(schema.properties).forEach(([name, property]) => {
+    result += `const ${name}: ${getType(property)};\n`;
+  });
+
+  return result;
+};
+
+const getType = (
+  property:
+    | {
+        $ref?: string;
+        type?: string;
+        enum?: any;
+        items?: { type: string } | { $ref: string };
+        choices?: SchemaPartType[];
+        properties?: {
+          [key: string]: SchemaPartType;
+        };
+        functions?: SchemaPart["functions"];
+      }
+    | undefined
+): string => {
+  if (property === undefined) {
+    return "void";
+  }
+
   if (property.$ref) {
     return property.$ref;
   }
@@ -407,6 +464,10 @@ const getType = (property: {
           isInterfaceProperty: true,
           ...prop,
         });
+      });
+      const functions = property.functions || [];
+      functions.forEach(({ name }) => {
+        console.log(`> func: '${name}`);
       });
       return `{
   ${result}
@@ -474,6 +535,15 @@ const generateTypeTypings = (
             ...prop,
           });
         });
+        result += `\n`;
+      }
+      if (schemaPart.functions) {
+        schemaPart.functions.forEach((func) => {
+          result += `${createFunctionDefinition(func, "", {
+            omitFunctionKeyword: true,
+          })}\n`;
+        });
+        result += `\n`;
       }
       result += `  }\n`;
     } else if (schemaPart.type === "string") {
@@ -513,6 +583,7 @@ import messenger = browser;
 
     data += generateTypeTypings(namespace, namespaces);
     data += generateFunctionTypings(namespace, namespaces);
+    data += generateNamespacePropertyTypings(namespace, namespaces);
 
     data += `}\n\n`;
   });
