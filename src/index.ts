@@ -16,6 +16,7 @@ interface SchemaPartFunction {
   readonly async: "callback" | "responseCallback" | boolean;
   readonly description: string;
   readonly parameters: SchemaPartFunctionParameter[];
+  readonly returns: SchemaPartFunctionParameter;
 }
 
 interface SchemaPartType {
@@ -27,6 +28,7 @@ interface SchemaPartType {
     [key: string]: SchemaPartType;
   };
   readonly functions: SchemaPartFunction[];
+  readonly events: SchemaPartFunction[];
   readonly choices?: SchemaPartType[];
   readonly enum?: SchemaPartType[];
   readonly optional?: boolean;
@@ -40,7 +42,8 @@ interface SchemaPropertyType {
 interface SchemaPart {
   readonly namespace: string;
   readonly description?: string;
-  readonly functions: SchemaPartFunction[];
+  readonly functions: SchemaPartType["functions"];
+  readonly events: SchemaPartType["events"];
   readonly types: SchemaPartType[];
   readonly properties: { [key: string]: SchemaPropertyType };
 }
@@ -151,6 +154,23 @@ const mergeNamespaceFunctions = (
     );
 };
 
+const mergeNamespaceEvents = (
+  events: SchemaPartFunction[],
+  existingSchemaPart: SchemaPart
+) => {
+  return events.concat(existingSchemaPart.events).filter(
+    // (schemaPart, index, result) => result.indexOf(schemaPart) === index
+    (schemaPart, index, result) =>
+      result.findIndex(
+        (item, itemIndex) =>
+          item.async === schemaPart.async && item.name === schemaPart.name
+            ? itemIndex
+            : -1
+        // TODO: match parameters -- item.parameters
+      ) === index
+  );
+};
+
 const mergeNamespaceTypes = (
   types: SchemaPartType[],
   existingSchemaPart: SchemaPart
@@ -177,10 +197,21 @@ const mergeNameSpaceProperties = (
 const mergeSchema = (schemaParts: SchemaPart[]): Map<string, SchemaPart> => {
   const namespaces = new Map<string, SchemaPart>();
   schemaParts.forEach((schemaPart) => {
-    const { namespace, functions = [], types = [], properties } = schemaPart;
+    const {
+      namespace,
+      functions = [],
+      types = [],
+      events = [],
+      properties,
+    } = schemaPart;
     if (!namespaces.has(namespace)) {
       // initialize the namespace object
-      namespaces.set(namespace, { ...schemaPart, functions, types });
+      namespaces.set(namespace, {
+        ...schemaPart,
+        functions,
+        types,
+        events,
+      });
     } else {
       // update existing parts
       const existingSchemaPart = namespaces.get(namespace)!;
@@ -189,6 +220,7 @@ const mergeSchema = (schemaParts: SchemaPart[]): Map<string, SchemaPart> => {
         functions: mergeNamespaceFunctions(functions, existingSchemaPart),
         types: mergeNamespaceTypes(types, existingSchemaPart),
         properties: mergeNameSpaceProperties(properties, existingSchemaPart),
+        events: mergeNamespaceEvents(events, existingSchemaPart),
       };
 
       namespaces.set(namespace, mergedSchemaPart);
@@ -247,12 +279,20 @@ const generateDescription = (
 const createFunctionDefinition = (
   schemaPart: SchemaPartFunction,
   currentNamespace: string,
-  options?: { omitFunctionKeyword: boolean }
+  options?: {
+    omitFunctionKeyword?: boolean;
+    omitFunctionName?: boolean;
+    omitDescription?: boolean;
+  }
 ) => {
-  const { omitFunctionKeyword = false } = options || {};
+  const {
+    omitFunctionKeyword = false,
+    omitFunctionName = false,
+    omitDescription = false,
+  } = options || {};
   let result = "";
   const findReturnType = (func: SchemaPartFunction) => {
-    const parameters = schemaPart.parameters.filter(
+    const parameters = (schemaPart.parameters || []).filter(
       (param) => param.name !== "callback" && param.name !== "responseCallback"
     );
     if (typeof func.async === "string") {
@@ -275,8 +315,14 @@ const createFunctionDefinition = (
       return { returnType: "ERR", parameters: [] };
     }
 
+    let functionResultType = "void";
+    if (func.returns) {
+      const { type } = func.returns;
+      functionResultType = type;
+    }
+
     return {
-      returnType: func.async === true ? "Promise<any>" : "void",
+      returnType: func.async === true ? "Promise<any>" : functionResultType,
       parameters,
     };
   };
@@ -289,7 +335,9 @@ const createFunctionDefinition = (
     // );
     logger.error(error);
   }
-  result += generateDescription(schemaPart);
+  if (!omitDescription) {
+    result += generateDescription(schemaPart);
+  }
 
   // check if we have optional parameters BEFORE defining required parameters
   // if so, add additional function signatures
@@ -309,7 +357,7 @@ const createFunctionDefinition = (
 
     while (params.findIndex(({ optional }) => optional) >= 0) {
       overrides += `  ${omitFunctionKeyword ? "" : "function "}${
-        schemaPart.name
+        omitFunctionName ? "" : schemaPart.name
       }(${generateFunctionParams(requireAllParams(params))}): ${returnType};`;
       overrides += `\n`;
       const firstElementToBeRemoved = params.findIndex(
@@ -320,12 +368,12 @@ const createFunctionDefinition = (
 
     result += overrides;
     result += `  ${omitFunctionKeyword ? "" : "function "}${
-      schemaPart.name
+      omitFunctionName ? "" : schemaPart.name
     }(${generateFunctionParams(requireAllParams(params))}): ${returnType};`;
     result += `\n`;
   } else {
     result += `  ${omitFunctionKeyword ? "" : "function "}${
-      schemaPart.name
+      omitFunctionName ? "" : schemaPart.name
     }(${generateFunctionParams(parameters)}): ${returnType};`;
     result += `\n`;
   }
@@ -356,6 +404,31 @@ const generateFunctionTypings = (
 
   schema.functions.forEach((schemaPart) => {
     result += createFunctionDefinition(schemaPart, currentNamespace);
+  });
+  return result;
+};
+
+const generateEventTypings = (
+  currentNamespace: string,
+  namespaces: Map<string, SchemaPart>
+): string => {
+  let result = "";
+  const schema = namespaces.get(currentNamespace);
+  if (!schema || schema.events.length === 0) {
+    return result;
+  }
+
+  schema.events.forEach((schemaPart, index) => {
+    result += `    const /* ${index + 1} of ${schema.events.length} */ ${
+      schemaPart.name
+    }: EventHandler<(`;
+    (schemaPart.parameters || []).forEach((prop) => {
+      result += `        ${generateDescription(prop)}\n`;
+      result += `        ${prop.name}${prop.optional ? "?" : ""}: `;
+      result += getType(prop);
+      result += ",\n";
+    });
+    result += `    ) => void>;\n`;
   });
   return result;
 };
@@ -403,6 +476,9 @@ const getType = (
   }
 
   if (property.$ref) {
+    if (`${property.$ref}`.indexOf(".") >= 0) {
+      return `/* lookup type? "${property.$ref}" */ ${property.$ref}`;
+    }
     return property.$ref;
   }
 
@@ -454,9 +530,14 @@ const getType = (
     return choices.map((choice) => getType(choice)).join(" | ");
   }
 
+  if (property.type === "any") {
+    return "any";
+  }
+
   if (property.type === "object") {
     if (property.properties) {
       const entries = Object.entries(property.properties);
+      // console.log(`XX --> ${entries}`);
       let result = "";
       entries.forEach(([name, prop]) => {
         result += generatePropertyTypings({
@@ -495,6 +576,7 @@ const generatePropertyTypings = (property: {
 }): string => {
   let result = "";
   if (property.unsupported) {
+    // result += `/* `;
     return result;
   }
 
@@ -539,7 +621,10 @@ const generateTypeTypings = (
       }
       if (schemaPart.functions) {
         schemaPart.functions.forEach((func) => {
+          result += `${generateDescription(func)}\n`;
+          // result += `${func.name}: ${createFunctionDefinition(func, "", {
           result += `${createFunctionDefinition(func, "", {
+            omitDescription: true,
             omitFunctionKeyword: true,
           })}\n`;
         });
@@ -576,6 +661,12 @@ const generateTypingsFile = async (
 
 import messenger = browser;
 
+interface EventHandler<T> {
+  readonly addListener: (callback: T) => void;
+  readonly hasListener: (callback: T) => boolean;
+  readonly removeListener: (callback: T) => void;
+}
+
 `;
   namespaces.forEach((schema, namespace) => {
     data += generateDescription(schema);
@@ -583,6 +674,7 @@ import messenger = browser;
 
     data += generateTypeTypings(namespace, namespaces);
     data += generateFunctionTypings(namespace, namespaces);
+    data += generateEventTypings(namespace, namespaces);
     data += generateNamespacePropertyTypings(namespace, namespaces);
 
     data += `}\n\n`;
