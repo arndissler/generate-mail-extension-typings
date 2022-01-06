@@ -158,17 +158,17 @@ const mergeNamespaceEvents = (
   events: SchemaPartFunction[],
   existingSchemaPart: SchemaPart
 ) => {
-  return events.concat(existingSchemaPart.events).filter(
-    // (schemaPart, index, result) => result.indexOf(schemaPart) === index
-    (schemaPart, index, result) =>
-      result.findIndex(
-        (item, itemIndex) =>
-          item.async === schemaPart.async && item.name === schemaPart.name
-            ? itemIndex
-            : -1
-        // TODO: match parameters -- item.parameters
-      ) === index
+  const result = events.concat(
+    existingSchemaPart.events.filter(
+      (schemaPart) =>
+        !events.some(
+          (item) =>
+            item.async === schemaPart.async && item.name === schemaPart.name
+        )
+    )
   );
+
+  return result;
 };
 
 const mergeNamespaceTypes = (
@@ -283,12 +283,18 @@ const createFunctionDefinition = (
     omitFunctionKeyword?: boolean;
     omitFunctionName?: boolean;
     omitDescription?: boolean;
+    inlineFunction?: boolean;
+    overrideDelimiter?: string;
+    wrapInBrackets?: boolean;
   }
 ) => {
   const {
     omitFunctionKeyword = false,
     omitFunctionName = false,
     omitDescription = false,
+    inlineFunction = false,
+    overrideDelimiter = ";",
+    wrapInBrackets = false,
   } = options || {};
   let result = "";
   const findReturnType = (func: SchemaPartFunction) => {
@@ -318,7 +324,8 @@ const createFunctionDefinition = (
     let functionResultType = "void";
     if (func.returns) {
       const { type } = func.returns;
-      functionResultType = type;
+      // TODO: map array type correctly (via "items")
+      functionResultType = type === "array" ? "[]" : type;
     }
 
     return {
@@ -328,6 +335,8 @@ const createFunctionDefinition = (
   };
 
   const { returnType, parameters } = findReturnType(schemaPart);
+  const delimStart = wrapInBrackets ? "(" : "";
+  const delimEnd = wrapInBrackets ? ")" : "";
 
   if (returnType === "ERR") {
     const error = `Unknown async type, namespace ${currentNamespace}, function '${schemaPart.name}': '${schemaPart.async}'`;
@@ -356,9 +365,11 @@ const createFunctionDefinition = (
     let overrides = "";
 
     while (params.findIndex(({ optional }) => optional) >= 0) {
-      overrides += `  ${omitFunctionKeyword ? "" : "function "}${
+      overrides += `  ${delimStart}${omitFunctionKeyword ? "" : "function "}${
         omitFunctionName ? "" : schemaPart.name
-      }(${generateFunctionParams(requireAllParams(params))}): ${returnType};`;
+      }(${generateFunctionParams(requireAllParams(params))})${
+        inlineFunction ? " => " : ": "
+      }${returnType}${delimEnd}${overrideDelimiter}`;
       overrides += `\n`;
       const firstElementToBeRemoved = params.findIndex(
         ({ optional }) => optional
@@ -367,14 +378,18 @@ const createFunctionDefinition = (
     }
 
     result += overrides;
-    result += `  ${omitFunctionKeyword ? "" : "function "}${
+    result += `  ${delimStart}${omitFunctionKeyword ? "" : "function "}${
       omitFunctionName ? "" : schemaPart.name
-    }(${generateFunctionParams(requireAllParams(params))}): ${returnType};`;
+    }(${generateFunctionParams(requireAllParams(params))})${
+      inlineFunction ? " => " : ": "
+    }${returnType}${delimEnd}${overrideDelimiter}`;
     result += `\n`;
   } else {
-    result += `  ${omitFunctionKeyword ? "" : "function "}${
+    result += `  ${delimStart}${omitFunctionKeyword ? "" : "function "}${
       omitFunctionName ? "" : schemaPart.name
-    }(${generateFunctionParams(parameters)}): ${returnType};`;
+    }(${generateFunctionParams(parameters)})${
+      inlineFunction ? " => " : ": "
+    }${returnType}${delimEnd}${overrideDelimiter}`;
     result += `\n`;
   }
   return result;
@@ -421,14 +436,17 @@ const generateEventTypings = (
   schema.events.forEach((schemaPart, index) => {
     result += `    const /* ${index + 1} of ${schema.events.length} */ ${
       schemaPart.name
-    }: EventHandler<(`;
-    (schemaPart.parameters || []).forEach((prop) => {
-      result += `        ${generateDescription(prop)}\n`;
-      result += `        ${prop.name}${prop.optional ? "?" : ""}: `;
-      result += getType(prop);
-      result += ",\n";
+    }: EventHandler<`;
+    result += createFunctionDefinition(schemaPart, "", {
+      omitFunctionName: true,
+      omitFunctionKeyword: true,
+      inlineFunction: true,
+      overrideDelimiter: " | ",
+      wrapInBrackets: true,
     });
-    result += `    ) => void>;\n`;
+    result = result.substring(0, result.length - 4);
+
+    result += `>;\n`;
   });
   return result;
 };
