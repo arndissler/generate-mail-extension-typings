@@ -13,10 +13,10 @@ interface SchemaPartFunctionParameter {
 
 interface SchemaPartFunction {
   readonly name: string;
-  readonly async: "callback" | "responseCallback" | boolean;
+  readonly async: "callback" | "responseCallback" | boolean | string;
   readonly description: string;
   readonly parameters: SchemaPartFunctionParameter[];
-  readonly returns: SchemaPartFunctionParameter;
+  readonly returns: SchemaPartFunctionParameter | null;
 }
 
 interface SchemaPartType {
@@ -32,10 +32,12 @@ interface SchemaPartType {
   readonly choices?: SchemaPartType[];
   readonly enum?: SchemaPartType[];
   readonly optional?: boolean;
+  readonly name?: string;
 }
 
 interface SchemaPropertyType {
   readonly $ref?: string;
+  readonly value: string;
   readonly description: string;
 }
 
@@ -398,10 +400,23 @@ const createFunctionDefinition = (
 const generateFunctionParams = (parameters: SchemaPartFunctionParameter[]) => {
   const result: string[] = [];
   parameters.forEach((param) => {
+    // TODO: this parameter mapping is awful and sloppy - so fix this!
+    const functionParam = {
+      ...param,
+      parameters: param.parameters?.map<SchemaPartFunctionParameter>(
+        (item) => ({
+          name: item.name || "",
+          optional: item.optional ?? false,
+          type: item.type || "",
+          description: item.description ?? "",
+          parameters: [],
+        })
+      ),
+    };
     result.push(
       `${generateDescription(param)}\n${param.name}${
         param.optional ? "?" : ""
-      }: ${getType(param)}`.trim()
+      }: ${getType(functionParam)}`.trim()
     );
   });
   return result.join(", ");
@@ -465,10 +480,13 @@ const generateNamespacePropertyTypings = (
     return result;
   }
 
-  console.log(schema.properties);
-  console.log(">> ", schema.properties.keys);
   Object.entries(schema.properties).forEach(([name, property]) => {
-    result += `const ${name}: ${getType(property)};\n`;
+    result += generateDescription(property);
+    if (property.$ref) {
+      result += `const ${name}: ${getType(property)};\n`;
+    } else {
+      result += `const ${name} = ${property.value};\n`;
+    }
   });
 
   return result;
@@ -476,7 +494,7 @@ const generateNamespacePropertyTypings = (
 
 const getType = (
   property:
-    | {
+    | ({
         $ref?: string;
         type?: string;
         enum?: any;
@@ -486,7 +504,12 @@ const getType = (
           [key: string]: SchemaPartType;
         };
         functions?: SchemaPart["functions"];
-      }
+      } & Partial<
+        Pick<
+          SchemaPartFunction,
+          "async" | "parameters" | "name" | "description" | "returns"
+        >
+      >)
     | undefined
 ): string => {
   if (property === undefined) {
@@ -533,7 +556,7 @@ const getType = (
     } else {
       const refName = (items["$ref"] || "") as string;
       if (refName.indexOf(".") >= 0) {
-        return `void /* ${refName} */`;
+        return `/* z8array */${refName}[]`;
       }
       return `${refName}[]`;
     }
@@ -546,6 +569,25 @@ const getType = (
   if (property.choices && Array.isArray(property.choices)) {
     const { choices = [] } = property;
     return choices.map((choice) => getType(choice)).join(" | ");
+  }
+
+  if (property.type === "function") {
+    const schemaPart: SchemaPartFunction = {
+      ...property,
+      name: "",
+      async: property.async ?? false,
+      description: "",
+      parameters: property.parameters ?? [],
+      returns: property.returns ?? null,
+    };
+    return `/* or any?  */ ${createFunctionDefinition(schemaPart, "", {
+      omitFunctionKeyword: true,
+      omitFunctionName: true,
+      omitDescription: true,
+      inlineFunction: true,
+      // overrideDelimiter: ",",
+      overrideDelimiter: " , ",
+    })} /* x7 */ \n`;
   }
 
   if (property.type === "any") {
@@ -575,7 +617,7 @@ const getType = (
     return `/* "unknown" ${property.properties} */ object`;
   }
 
-  return "void";
+  return "void /* could not determine correct type */";
 };
 
 const generatePropertyTypings = (property: {
@@ -605,7 +647,7 @@ const generatePropertyTypings = (property: {
     result += generateDescription(property, 1);
     result += `    ${property.name}${property.optional ? "?" : ""}: ${getType(
       property
-    )};\n`;
+    )}\n`;
   }
 
   return result;
