@@ -3,6 +3,8 @@ import { join, sep, resolve } from "path";
 import { opendir, readFile, writeFile } from "fs/promises";
 import meow from "meow";
 
+const DEBUG = false;
+
 interface SchemaPartFunctionParameter {
   readonly name: string;
   readonly optional: boolean;
@@ -91,6 +93,8 @@ const cli = meow(
     },
   }
 );
+
+const debug = (msg: string) => (DEBUG ? msg : "");
 
 const readSchemaFileNames = async (
   directoryName: string
@@ -322,13 +326,25 @@ const createFunctionDefinition = (
       const unwrappedAsyncReturnType = getType(
         (asyncReturnType?.parameters || []).shift(),
         namespaces,
+        currentNamespace
       );
+
+      let optionalFallBackType = "";
+      if (
+        asyncReturnType?.name == "callback" &&
+        asyncReturnType?.optional
+      ) {
+        optionalFallBackType = " | null";
+      }
+
       const funcParams = func.parameters.filter(
         (param) => param.name !== func.async //&& param.type === "function"
       );
 
       return {
-        returnType: `Promise<${unwrappedAsyncReturnType || "any"}>`,
+        returnType: `Promise<${
+          unwrappedAsyncReturnType || "any"
+        }${optionalFallBackType}>`,
         parameters: funcParams,
       };
 
@@ -372,16 +388,22 @@ const createFunctionDefinition = (
     .slice(firstOptionalParameterIndex)
     .every(({ optional }) => optional);
 
+  const reservedWords = ["import", "delete", "class"];
+  const isNameReserved = reservedWords.includes(schemaPart.name);
+  const funcName = isNameReserved ? `__${schemaPart.name}` : schemaPart.name;
   if (!allTrailingAreOptional) {
     const requireAllParams = (params: SchemaPartFunctionParameter[]) =>
-      params.map((parameter) => ({ ...parameter, optional: false }));
+      params.map((parameter) => ({
+        ...parameter,
+        optional: parameter.name === "callback" ? parameter.optional : false,
+      }));
 
     let params = [...parameters];
     let overrides = "";
 
     while (params.findIndex(({ optional }) => optional) >= 0) {
       overrides += `  ${delimStart}${omitFunctionKeyword ? "" : "function "}${
-        omitFunctionName ? "" : schemaPart.name
+        omitFunctionName ? "" : funcName
       }(${generateFunctionParams(requireAllParams(params))})${
         inlineFunction ? " => " : ": "
       }${returnType}${delimEnd}${overrideDelimiter}`;
@@ -394,18 +416,22 @@ const createFunctionDefinition = (
 
     result += overrides;
     result += `  ${delimStart}${omitFunctionKeyword ? "" : "function "}${
-      omitFunctionName ? "" : schemaPart.name
+      omitFunctionName ? "" : funcName
     }(${generateFunctionParams(requireAllParams(params))})${
       inlineFunction ? " => " : ": "
     }${returnType}${delimEnd}${overrideDelimiter}`;
     result += `\n`;
   } else {
     result += `  ${delimStart}${omitFunctionKeyword ? "" : "function "}${
-      omitFunctionName ? "" : schemaPart.name
+      omitFunctionName ? "" : funcName
     }(${generateFunctionParams(parameters)})${
       inlineFunction ? " => " : ": "
     }${returnType}${delimEnd}${overrideDelimiter}`;
     result += `\n`;
+  }
+
+  if (isNameReserved) {
+    result += `\n export { ${funcName} as ${schemaPart.name} }\n\n`;
   }
   return result;
 };
@@ -467,13 +493,15 @@ const generateEventTypings = (
   }
 
   schema.events.forEach((schemaPart, index) => {
-    result += `    const /* ${index + 1} of ${schema.events.length} */ ${
-      schemaPart.name
-    }: EventHandler<`;
-    result += createFunctionDefinition(schemaPart, "", {
-      omitFunctionName: true,
-      omitFunctionKeyword: true,
-      inlineFunction: true,
+    const dbg = debug(`/* ${index + 1} of ${schema.events.length} */ }`);
+    result += `    const ${dbg}${schemaPart.name}: EventHandler<`;
+    result += createFunctionDefinition(
+      schemaPart,
+      "",
+      {
+        omitFunctionName: true,
+        omitFunctionKeyword: true,
+        inlineFunction: true,
       overrideDelimiter: " | ",
       wrapInBrackets: true,
       },
@@ -538,6 +566,7 @@ const getType = (
       >)
     | undefined,
   namespaces?: Map<string, SchemaPart>,
+  currentNamespace?: string
 ): string => {
   if (property === undefined) {
     return "void";
@@ -545,7 +574,10 @@ const getType = (
 
   if (property.$ref) {
     if (`${property.$ref}`.indexOf(".") >= 0) {
-      return `/* lookup type? "${property.$ref}" */ ${property.$ref}`;
+      const dbg = debug(
+        `/* lookup type? "${property.$ref}", optional? ${property.properties?.optional} */`
+      );
+      return `${dbg} ${property.$ref}`;
     }
 
     // if no '.' is included it's the local/current namespace
@@ -595,7 +627,8 @@ const getType = (
     } else {
       const refName = (items["$ref"] || "") as string;
       if (refName.indexOf(".") >= 0) {
-        return `/* z8array */${refName}[]`;
+        const dbg = debug("/* z8array */");
+        return `${dbg}${refName}[]`;
       }
       return `${refName}[]`;
     }
@@ -619,14 +652,19 @@ const getType = (
       parameters: property.parameters ?? [],
       returns: property.returns ?? null,
     };
-    return `/* or any?  */ ${createFunctionDefinition(schemaPart, "", {
-      omitFunctionKeyword: true,
-      omitFunctionName: true,
-      omitDescription: true,
-      inlineFunction: true,
-      // overrideDelimiter: ",",
-      overrideDelimiter: " , ",
-    })} /* x7 */ \n`;
+    return `/* or any?  */ ${createFunctionDefinition(
+      schemaPart,
+      "",
+      {
+        omitFunctionKeyword: true,
+        omitFunctionName: true,
+        omitDescription: true,
+        inlineFunction: true,
+        // overrideDelimiter: ",",
+        overrideDelimiter: " , ",
+      },
+      namespaces
+    )} /* x7 */ \n`;
   }
 
   if (property.type === "any") {
@@ -706,7 +744,7 @@ const generateTypeTypings = (
     result += generateDescription(schemaPart);
 
     if (schemaPart.type === "object") {
-      result += `  interface ${schemaPart.id} {\n`;
+      result += `  export interface ${schemaPart.id} {\n`;
       if (schemaPart.properties) {
         const entries = Object.entries(schemaPart.properties);
         entries.forEach(([name, prop]) => {
@@ -722,10 +760,15 @@ const generateTypeTypings = (
         schemaPart.functions.forEach((func) => {
           result += `${generateDescription(func)}\n`;
           // result += `${func.name}: ${createFunctionDefinition(func, "", {
-          result += `${createFunctionDefinition(func, "", {
-            omitDescription: true,
-            omitFunctionKeyword: true,
-          })}\n`;
+          result += `${createFunctionDefinition(
+            func,
+            "",
+            {
+              omitDescription: true,
+              omitFunctionKeyword: true,
+            },
+            namespaces
+          )}\n`;
         });
         result += `\n`;
       }
@@ -737,12 +780,16 @@ const generateTypeTypings = (
       result += generateDescription(schemaPart);
       result += `  type ${schemaPart.id} = string;`;
     } else if (schemaPart.id) {
-      result += `  /* skipped: ${schemaPart.id}: ${schemaPart.type} */\n`;
+      result += debug(
+        `  /* skipped: ${schemaPart.id}: ${schemaPart.type} */\n`
+      );
       result += `  type ${schemaPart.id} = ${getType({ ...schemaPart })};`;
     } else {
-      result += `  /* skipped: .extend ${(schemaPart as any).$extend}: ${
-        schemaPart.type
-      } */\n`;
+      result += debug(
+        `  /* skipped: .extend ${(schemaPart as any).$extend}: ${
+          schemaPart.type
+        } */\n`
+      );
     }
     result += `\n`;
   });
