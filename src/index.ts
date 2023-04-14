@@ -33,12 +33,8 @@ interface SchemaPartType {
   readonly enum?: SchemaPartType[];
   readonly optional?: boolean;
   readonly name?: string;
-}
-
-interface SchemaPropertyType {
+  readonly value?: string;
   readonly $ref?: string;
-  readonly value: string;
-  readonly description: string;
 }
 
 interface SchemaPart {
@@ -47,7 +43,7 @@ interface SchemaPart {
   readonly functions: SchemaPartType["functions"];
   readonly events: SchemaPartType["events"];
   readonly types: SchemaPartType[];
-  readonly properties: { [key: string]: SchemaPropertyType };
+  readonly properties: { [key: string]: SchemaPartType };
 }
 
 const logger = {
@@ -259,6 +255,21 @@ const readSchemaFiles = async (filenames: string[]): Promise<SchemaPart[]> => {
   return result;
 };
 
+const findNamespaceFortype = (
+  $ref: string,
+  namespaces: Map<string, SchemaPart> | undefined
+): string[] => {
+  let result: string[] = [];
+  namespaces?.forEach(({ types }, namespace) => {
+    if (types.find((item) => item.id === $ref)) {
+      console.log(`FOUND! :: '${namespace}.${$ref}`);
+      result.push(namespace);
+    }
+  });
+
+  return result;
+};
+
 const generateDescription = (
   chunk: { description?: string },
   indention: number = 0
@@ -288,7 +299,8 @@ const createFunctionDefinition = (
     inlineFunction?: boolean;
     overrideDelimiter?: string;
     wrapInBrackets?: boolean;
-  }
+  },
+  namespaces?: Map<string, SchemaPart>
 ) => {
   const {
     omitFunctionKeyword = false,
@@ -308,7 +320,8 @@ const createFunctionDefinition = (
         (param) => param.name === func.async && param.type === "function"
       );
       const unwrappedAsyncReturnType = getType(
-        (asyncReturnType?.parameters || []).shift()
+        (asyncReturnType?.parameters || []).shift(),
+        namespaces,
       );
       const funcParams = func.parameters.filter(
         (param) => param.name !== func.async //&& param.type === "function"
@@ -433,7 +446,12 @@ const generateFunctionTypings = (
   }
 
   schema.functions.forEach((schemaPart) => {
-    result += createFunctionDefinition(schemaPart, currentNamespace);
+    result += createFunctionDefinition(
+      schemaPart,
+      currentNamespace,
+      undefined,
+      namespaces
+    );
   });
   return result;
 };
@@ -458,7 +476,9 @@ const generateEventTypings = (
       inlineFunction: true,
       overrideDelimiter: " | ",
       wrapInBrackets: true,
-    });
+      },
+      namespaces
+    );
     result = result.substring(0, result.length - 4);
 
     result += `>;\n`;
@@ -485,7 +505,13 @@ const generateNamespacePropertyTypings = (
     if (property.$ref) {
       result += `const ${name}: ${getType(property)};\n`;
     } else {
-      result += `const ${name} = ${property.value};\n`;
+      if (property.value) {
+        result += `const ${name} = ${property.value};\n`;
+      } else {
+        /* TODO: result += `${name}${property.optional ? "?" : ""}: ${getType(
+          property
+        )}; \n`;*/
+      }
     }
   });
 
@@ -510,7 +536,8 @@ const getType = (
           "async" | "parameters" | "name" | "description" | "returns"
         >
       >)
-    | undefined
+    | undefined,
+  namespaces?: Map<string, SchemaPart>,
 ): string => {
   if (property === undefined) {
     return "void";
@@ -520,7 +547,19 @@ const getType = (
     if (`${property.$ref}`.indexOf(".") >= 0) {
       return `/* lookup type? "${property.$ref}" */ ${property.$ref}`;
     }
-    return property.$ref;
+
+    // if no '.' is included it's the local/current namespace
+    const namespace = findNamespaceFortype(property.$ref, namespaces);
+    if (namespace.length === 0) {
+      logger.warn(`ERROR: namespace '${property.$ref}' not found.`);
+      return `${property.$ref}`;
+    }
+
+    const targetNamespace = namespace.pop();
+    if (currentNamespace && targetNamespace === currentNamespace) {
+      return `${property.$ref}`;
+    }
+    return `${targetNamespace}.${property.$ref}`;
   }
 
   if (property.type === "integer") {
